@@ -186,13 +186,12 @@ def check_array_lengths(X, Y, W):
 
 
 def check_loss_and_target_compatibility(targets, losses, output_shapes):
-    assert len(targets) == len(losses) == len(output_shapes)
     key_losses = {'mean_square_error',
                   'binary_crossentropy',
                   'categorical_crossentropy'}
     for y, loss, shape in zip(targets, losses, output_shapes):
         if loss.__name__ == 'categorical_crossentropy':
-            if y.shape[1] == 1:
+            if y.shape[-1] == 1:
                 raise Exception('You are passing a target array of shape ' + str(y.shape) +
                                 ' while using as loss `categorical_crossentropy`. '
                                 '`categorical_crossentropy` expects '
@@ -208,13 +207,15 @@ def check_loss_and_target_compatibility(targets, losses, output_shapes):
                                 'Alternatively, you can use the loss function '
                                 '`sparse_categorical_crossentropy` instead, '
                                 'which does expect integer targets.')
-        if loss.__name__ in key_losses and shape[1] is not None and y.shape[1] != shape[1]:
-            raise Exception('A target array with shape ' + str(y.shape) +
-                            ' was passed for an output of shape ' + str(shape) +
-                            ' while using as loss `' + loss.__name__ + '`. '
-                            'This loss expects '
-                            'targets to have the same shape '
-                            'as the output.')
+        if loss.__name__ in key_losses:
+            for target_dim, out_dim in zip(y.shape[1:], shape[1:]):
+                if target_dim is not None and target_dim != out_dim:
+                    raise Exception('A target array with shape ' + str(y.shape) +
+                                    ' was passed for an output of shape ' + str(shape) +
+                                    ' while using as loss `' + loss.__name__ + '`. '
+                                    'This loss expects '
+                                    'targets to have the same shape '
+                                    'as the output.')
 
 
 def collect_metrics(metrics, output_names):
@@ -258,10 +259,12 @@ def collect_trainable_weights(layer):
         weights += layer.trainable_weights
     # dedupe weights
     weights = list(set(weights))
-    # TF variables have auto-generated the name, while Theano has auto-generated the auto_name variable. name in Theano is None
+    # TF variables have auto-generated the name, while Theano has auto-generated the auto_name variable.
+    # name in Theano is sometimes None.
+    # However, to work save_model() and load_model() properly, weights must be sorted by names.
     if weights:
         if K.backend() == 'theano':
-            weights.sort(key=lambda x: x.auto_name)
+            weights.sort(key=lambda x: x.name if x.name else x.auto_name)
         else:
             weights.sort(key=lambda x: x.name)
     return weights
@@ -610,7 +613,10 @@ class Model(Container):
         for i in range(len(self.outputs)):
             shape = self.internal_output_shapes[i]
             name = self.output_names[i]
-            self.targets.append(K.placeholder(ndim=len(shape), name=name + '_target'))
+            self.targets.append(K.placeholder(ndim=len(shape),
+                                name=name + '_target',
+                                sparse=K.is_sparse(self.outputs[i]),
+                                dtype=K.dtype(self.outputs[i])))
 
         # prepare metrics
         self.metrics = metrics
@@ -754,7 +760,7 @@ class Model(Container):
     def _fit_loop(self, f, ins, out_labels=[], batch_size=32,
                   nb_epoch=100, verbose=1, callbacks=[],
                   val_f=None, val_ins=None, shuffle=True,
-                  callback_metrics=[]):
+                  callback_metrics=[], initial_epoch=0):
         '''Abstract fit function for f(ins).
         Assume that f returns a list, labeled by out_labels.
 
@@ -774,6 +780,8 @@ class Model(Container):
                 passed to the callbacks. They should be the
                 concatenation of list the display names of the outputs of
                  `f` and the list of display names of the outputs of `f_val`.
+            initial_epoch: epoch at which to start training
+                (useful for resuming a previous training run)
 
         # Returns
             `History` object.
@@ -814,7 +822,7 @@ class Model(Container):
         callback_model.stop_training = False
         self.validation_data = val_ins
 
-        for epoch in range(nb_epoch):
+        for epoch in range(initial_epoch, nb_epoch):
             callbacks.on_epoch_begin(epoch)
             if shuffle == 'batch':
                 index_array = batch_shuffle(index_array, batch_size)
@@ -1001,7 +1009,7 @@ class Model(Container):
 
     def fit(self, x, y, batch_size=32, nb_epoch=10, verbose=1, callbacks=[],
             validation_split=0., validation_data=None, shuffle=True,
-            class_weight=None, sample_weight=None):
+            class_weight=None, sample_weight=None, initial_epoch=0):
         '''Trains the model for a fixed number of epochs (iterations on a dataset).
 
         # Arguments
@@ -1038,6 +1046,8 @@ class Model(Container):
                 with shape (samples, sequence_length),
                 to apply a different weight to every timestep of every sample.
                 In this case you should make sure to specify sample_weight_mode="temporal" in compile().
+            initial_epoch: epoch at which to start training
+                (useful for resuming a previous training run)
 
 
         # Returns
@@ -1121,7 +1131,8 @@ class Model(Container):
                               batch_size=batch_size, nb_epoch=nb_epoch,
                               verbose=verbose, callbacks=callbacks,
                               val_f=val_f, val_ins=val_ins, shuffle=shuffle,
-                              callback_metrics=callback_metrics)
+                              callback_metrics=callback_metrics,
+                              initial_epoch=initial_epoch)
 
     def evaluate(self, x, y, batch_size=32, verbose=1, sample_weight=None):
         '''Returns the loss value and metrics values for the model
@@ -1297,7 +1308,8 @@ class Model(Container):
     def fit_generator(self, generator, samples_per_epoch, nb_epoch,
                       verbose=1, callbacks=[],
                       validation_data=None, nb_val_samples=None,
-                      class_weight={}, max_q_size=10, nb_worker=1, pickle_safe=False):
+                      class_weight={}, max_q_size=10, nb_worker=1, pickle_safe=False,
+                      initial_epoch=0):
         '''Fits the model on data generated batch-by-batch by
         a Python generator.
         The generator is run in parallel to the model, for efficiency.
@@ -1333,6 +1345,8 @@ class Model(Container):
                 this implementation relies on multiprocessing, you should not pass
                 non picklable arguments to the generator as they can't be passed
                 easily to children processes.
+            initial_epoch: epoch at which to start training
+                (useful for resuming a previous training run)
 
         # Returns
             A `History` object.
@@ -1355,7 +1369,7 @@ class Model(Container):
         ```
         '''
         wait_time = 0.01  # in seconds
-        epoch = 0
+        epoch = initial_epoch
 
         do_validation = bool(validation_data)
         self._make_train_function()

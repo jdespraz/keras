@@ -337,6 +337,7 @@ class EarlyStopping(Callback):
         self.verbose = verbose
         self.min_delta = min_delta
         self.wait = 0
+        self.stopped_epoch = 0
 
         if mode not in ['auto', 'min', 'max']:
             warnings.warn('EarlyStopping mode %s is unknown, '
@@ -374,10 +375,13 @@ class EarlyStopping(Callback):
             self.wait = 0
         else:
             if self.wait >= self.patience:
-                if self.verbose > 0:
-                    print('Epoch %05d: early stopping' % (epoch))
+                self.stopped_epoch = epoch
                 self.model.stop_training = True
             self.wait += 1
+
+    def on_train_end(self, logs={}):
+        if self.stopped_epoch > 0 and self.verbose > 0:
+            print('Epoch %05d: early stopping' % (self.stopped_epoch))
 
 
 class RemoteMonitor(Callback):
@@ -432,7 +436,11 @@ class LearningRateScheduler(Callback):
         assert hasattr(self.model.optimizer, 'lr'), \
             'Optimizer must have a "lr" attribute.'
         lr = self.schedule(epoch)
-        assert type(lr) == float, 'The output of the "schedule" function should be float.'
+
+        if not isinstance(lr, (float, np.float32, np.float64)):
+            raise ValueError('The output of the "schedule" function '
+                             'should be float.')
+
         K.set_value(self.model.optimizer.lr, lr)
 
 
