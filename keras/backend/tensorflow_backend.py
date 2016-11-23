@@ -989,11 +989,11 @@ def function(inputs, outputs, updates=[], **kwargs):
     return Function(inputs, outputs, updates=updates)
 
 
-def gradients(loss, variables):
+def gradients(loss, variables, initial_vals=None):
     '''Returns the gradients of `variables` (list of tensor variables)
     with regard to `loss`.
     '''
-    return tf.gradients(loss, variables)
+    return tf.gradients(loss, variables, initial_vals)
 
 
 def stop_gradient(variables):
