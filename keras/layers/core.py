@@ -7,14 +7,13 @@ import numpy as np
 import copy
 import inspect
 import types as python_types
-import marshal
-import sys
 import warnings
 
 from .. import backend as K
 from .. import activations, initializations, regularizers, constraints
 from ..engine import InputSpec, Layer, Merge
 from ..regularizers import ActivityRegularizer
+from ..utils.generic_utils import func_dump, func_load
 
 
 class Masking(Layer):
@@ -97,6 +96,37 @@ class Dropout(Layer):
         return dict(list(base_config.items()) + list(config.items()))
 
 
+class SpatialDropout1D(Dropout):
+    '''This version performs the same function as Dropout, however it drops
+    entire 1D feature maps instead of individual elements. If adjacent frames
+    within feature maps are strongly correlated (as is normally the case in
+    early convolution layers) then regular dropout will not regularize the
+    activations and will otherwise just result in an effective learning rate
+    decrease. In this case, SpatialDropout1D will help promote independence
+    between feature maps and should be used instead.
+
+    # Arguments
+        p: float between 0 and 1. Fraction of the input units to drop.
+
+    # Input shape
+        3D tensor with shape:
+        `(samples, timesteps, channels)`
+
+    # Output shape
+        Same as input
+
+    # References
+        - [Efficient Object Localization Using Convolutional Networks](https://arxiv.org/pdf/1411.4280.pdf)
+    '''
+    def __init__(self, p, **kwargs):
+        super(SpatialDropout1D, self).__init__(p, **kwargs)
+
+    def _get_noise_shape(self, x):
+        input_shape = K.shape(x)
+        noise_shape = (input_shape[0], 1, input_shape[2])
+        return noise_shape
+    
+    
 class SpatialDropout2D(Dropout):
     '''This version performs the same function as Dropout, however it drops
     entire 2D feature maps instead of individual elements. If adjacent pixels
@@ -112,7 +142,7 @@ class SpatialDropout2D(Dropout):
             (the depth) is at index 1, in 'tf' mode is it at index 3.
             It defaults to the `image_dim_ordering` value found in your
             Keras config file at `~/.keras/keras.json`.
-            If you never set it, then it will be "th".
+            If you never set it, then it will be "tf".
 
     # Input shape
         4D tensor with shape:
@@ -160,7 +190,7 @@ class SpatialDropout3D(Dropout):
             is at index 1, in 'tf' mode is it at index 4.
             It defaults to the `image_dim_ordering` value found in your
             Keras config file at `~/.keras/keras.json`.
-            If you never set it, then it will be "th".
+            If you never set it, then it will be "tf".
 
     # Input shape
         5D tensor with shape:
@@ -484,16 +514,16 @@ class Lambda(Layer):
 
     # Arguments
         function: The function to be evaluated.
-            Takes one argument: the output of previous layer
+            Takes input tensor as first argument.
         output_shape: Expected output shape from function.
             Can be a tuple or function.
-            If a tuple, it only specifies the first dimension onward; 
+            If a tuple, it only specifies the first dimension onward;
                  sample dimension is assumed either the same as the input:
                  `output_shape = (input_shape[0], ) + output_shape`
                  or, the input is `None` and the sample dimension is also `None`:
                  `output_shape = (None, ) + output_shape`
-            If a function, it specifies the entire shape as a function of 
-                 the input shape: `output_shape = f(input_shape)`
+            If a function, it specifies the entire shape as a function of the
+            input shape: `output_shape = f(input_shape)`
         arguments: optional dictionary of keyword arguments to be passed
             to the function.
 
@@ -538,7 +568,10 @@ class Lambda(Layer):
             # otherwise, we default to the input shape
             return input_shape
         elif type(self._output_shape) in {tuple, list}:
-            nb_samples = input_shape[0] if input_shape else None
+            if type(input_shape) is list:
+                nb_samples = input_shape[0][0]
+            else:
+                nb_samples = input_shape[0] if input_shape else None
             return (nb_samples,) + tuple(self._output_shape)
         else:
             shape = self._output_shape(input_shape)
@@ -554,23 +587,15 @@ class Lambda(Layer):
         return self.function(x, **arguments)
 
     def get_config(self):
-        py3 = sys.version_info[0] == 3
-
         if isinstance(self.function, python_types.LambdaType):
-            if py3:
-                function = marshal.dumps(self.function.__code__).decode('raw_unicode_escape')
-            else:
-                function = marshal.dumps(self.function.func_code).decode('raw_unicode_escape')
+            function = func_dump(self.function)
             function_type = 'lambda'
         else:
             function = self.function.__name__
             function_type = 'function'
 
         if isinstance(self._output_shape, python_types.LambdaType):
-            if py3:
-                output_shape = marshal.dumps(self._output_shape.__code__).decode('raw_unicode_escape')
-            else:
-                output_shape = marshal.dumps(self._output_shape.func_code).decode('raw_unicode_escape')
+            output_shape = func_dump(self._output_shape)
             output_shape_type = 'lambda'
         elif callable(self._output_shape):
             output_shape = self._output_shape.__name__
@@ -593,8 +618,7 @@ class Lambda(Layer):
         if function_type == 'function':
             function = globals()[config['function']]
         elif function_type == 'lambda':
-            function = marshal.loads(config['function'].encode('raw_unicode_escape'))
-            function = python_types.FunctionType(function, globals())
+            function = func_load(config['function'], globs=globals())
         else:
             raise Exception('Unknown function type: ' + function_type)
 
@@ -602,8 +626,7 @@ class Lambda(Layer):
         if output_shape_type == 'function':
             output_shape = globals()[config['output_shape']]
         elif output_shape_type == 'lambda':
-            output_shape = marshal.loads(config['output_shape'].encode('raw_unicode_escape'))
-            output_shape = python_types.FunctionType(output_shape, globals())
+            output_shape = func_load(config['output_shape'], globs=globals())
         else:
             output_shape = config['output_shape']
 
@@ -669,7 +692,8 @@ class Dense(Layer):
     # Output shape
         2D tensor with shape: `(nb_samples, output_dim)`.
     '''
-    def __init__(self, output_dim, init='glorot_uniform', activation='linear', weights=None,
+    def __init__(self, output_dim, init='glorot_uniform',
+                 activation=None, weights=None,
                  W_regularizer=None, b_regularizer=None, activity_regularizer=None,
                  W_constraint=None, b_constraint=None,
                  bias=True, input_dim=None, **kwargs):
@@ -730,6 +754,7 @@ class Dense(Layer):
         if self.initial_weights is not None:
             self.set_weights(self.initial_weights)
             del self.initial_weights
+        self.built = True
 
     def call(self, x, mask=None):
         output = K.dot(x, self.W)
@@ -898,6 +923,7 @@ class MaxoutDense(Layer):
         if self.initial_weights is not None:
             self.set_weights(self.initial_weights)
             del self.initial_weights
+        self.built = True
 
     def get_output_shape_for(self, input_shape):
         assert input_shape and len(input_shape) == 2
@@ -970,7 +996,7 @@ class Highway(Layer):
         - [Highway Networks](http://arxiv.org/pdf/1505.00387v2.pdf)
     '''
     def __init__(self, init='glorot_uniform', transform_bias=-2,
-                 activation='linear', weights=None,
+                 activation=None, weights=None,
                  W_regularizer=None, b_regularizer=None, activity_regularizer=None,
                  W_constraint=None, b_constraint=None,
                  bias=True, input_dim=None, **kwargs):
@@ -1035,6 +1061,7 @@ class Highway(Layer):
         if self.initial_weights is not None:
             self.set_weights(self.initial_weights)
             del self.initial_weights
+        self.built = True
 
     def call(self, x, mask=None):
         y = K.dot(x, self.W_carry)
@@ -1113,7 +1140,7 @@ class TimeDistributedDense(Layer):
     '''
 
     def __init__(self, output_dim,
-                 init='glorot_uniform', activation='linear', weights=None,
+                 init='glorot_uniform', activation=None, weights=None,
                  W_regularizer=None, b_regularizer=None, activity_regularizer=None,
                  W_constraint=None, b_constraint=None,
                  bias=True, input_dim=None, input_length=None, **kwargs):
@@ -1175,6 +1202,7 @@ class TimeDistributedDense(Layer):
         if self.initial_weights is not None:
             self.set_weights(self.initial_weights)
             del self.initial_weights
+        self.built = True
 
     def get_output_shape_for(self, input_shape):
         return (input_shape[0], input_shape[1], self.output_dim)
